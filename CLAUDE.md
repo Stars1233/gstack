@@ -269,6 +269,31 @@ to `~/.gstack/security/attempts.jsonl` via `tunnel-denial-log.ts`. Before editin
 the module boundary (no imports from `token-registry.ts` into `sse-session-cookie.ts`)
 is load-bearing for scope isolation.
 
+**Unicode sanitization at server egress** (v1.38.0.0+). Every server egress that
+ships page-content-derived strings MUST go through `JSON.stringify(payload,
+sanitizeReplacer)` for object payloads or `sanitizeLoneSurrogates(body)` for text
+bodies. Lone UTF-16 surrogate halves from CDP page content otherwise reach the
+Anthropic API as `\uD800`-style escapes and trigger a 400. Wired at four egress
+points today: `handleCommandInternal` (HTTP + batch via a sanitizing wrapper around
+`handleCommandInternalImpl`) and both SSE producers (`/activity/stream`,
+`/inspector/events`). Post-stringify regex is a no-op — `JSON.stringify` has
+already escaped the surrogate before regex could match, so the replacer must run
+inside the encoding pipeline. Before adding a new SSE/WebSocket writer or HTTP
+response in `server.ts`, read
+[ARCHITECTURE.md](ARCHITECTURE.md#unicode-sanitization-at-server-egress-v13800).
+`browse/test/server-sanitize-surrogates.test.ts` pins the wiring with invariant
+tests, so bypasses fail CI.
+
+**Setup symlink hardening** (v1.38.0.0+). Every link site in `setup` MUST route
+through the `_link_or_copy SRC DST` helper near the `IS_WINDOWS` detection. On
+Windows without Developer Mode, plain `ln -snf` produces frozen file copies that
+don't refresh on `git pull` — silent staleness across every host adapter. The
+helper preserves `ln -snf` on Unix and switches to `cp -R` / `cp -f` on Windows.
+`test/setup-windows-fallback.test.ts` enforces a static invariant: a single raw
+`ln` call outside the helper body fails CI. Windows users get a one-line note
+from `_print_windows_copy_note_once` reminding them to re-run `./setup` after
+every `git pull`.
+
 **Sidebar security stack** (layered defense against prompt injection):
 
 | Layer | Module | Lives in |

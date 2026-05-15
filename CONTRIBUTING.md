@@ -342,6 +342,7 @@ When Conductor creates a new workspace, `bin/dev-setup` runs automatically. It d
 - **Conductor workspaces are independent.** Each workspace is its own git worktree. `bin/dev-setup` runs automatically via `conductor.json`.
 - **`.env` propagates across worktrees.** Set it once in the main repo, all Conductor workspaces get it.
 - **`.claude/skills/` is gitignored.** The symlinks never get committed.
+- **Never write raw `ln -snf` in `setup`.** Every link site in `setup` MUST route through the `_link_or_copy SRC DST` helper near the `IS_WINDOWS` detection. The helper preserves `ln -snf` on Unix and switches to `cp -R` / `cp -f` on Windows without Developer Mode, where plain `ln -snf` produces frozen file copies that don't refresh on `git pull`. `test/setup-windows-fallback.test.ts` enforces this with a static invariant — a single raw `ln` call outside the helper body fails CI.
 
 ## Testing your changes in a real project
 

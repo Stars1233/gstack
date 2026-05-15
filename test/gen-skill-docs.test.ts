@@ -2198,7 +2198,7 @@ describe('setup script validation', () => {
     expect(codexSection).toContain('create_codex_runtime_root');
     expect(codexSection).toContain('link_codex_skill_dirs');
     expect(codexSection).not.toContain('link_claude_skill_dirs');
-    expect(codexSection).not.toContain('ln -snf "$GSTACK_DIR" "$CODEX_GSTACK"');
+    expect(codexSection).not.toContain('_link_or_copy "$GSTACK_DIR" "$CODEX_GSTACK"');
   });
 
   test('Codex install prefers repo-local .agents/skills when setup runs from there', () => {
@@ -2238,7 +2238,8 @@ describe('setup script validation', () => {
     const fnEnd = setupContent.indexOf('}', setupContent.indexOf('linked[@]}', fnStart));
     const fnBody = setupContent.slice(fnStart, fnEnd);
     expect(fnBody).toContain('mkdir -p "$target"');
-    expect(fnBody).toContain('ln -snf "$gstack_dir/$dir_name/SKILL.md" "$target/SKILL.md"');
+    // v1.36.0.0: routes through _link_or_copy helper for Windows fallback (cp on MSYS2/Git Bash).
+    expect(fnBody).toContain('_link_or_copy "$gstack_dir/$dir_name/SKILL.md" "$target/SKILL.md"');
   });
 
   // REGRESSION: cleanup functions must handle both old symlinks AND new real-directory pattern
@@ -2345,7 +2346,7 @@ describe('setup script validation', () => {
     expect(fnBody).toContain('design-checklist.md');
     expect(fnBody).toContain('greptile-triage.md');
     expect(fnBody).toContain('TODOS-format.md');
-    expect(fnBody).not.toContain('ln -snf "$gstack_dir" "$codex_gstack"');
+    expect(fnBody).not.toContain('_link_or_copy "$gstack_dir" "$codex_gstack"');
   });
 
   test('direct Codex installs are migrated out of ~/.codex/skills/gstack', () => {

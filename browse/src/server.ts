@@ -59,6 +59,43 @@ import * as net from 'net';
 import * as path from 'path';
 import * as crypto from 'crypto';
 
+// ─── Unicode Sanitization ───────────────────────────────────────
+// Remove unpaired UTF-16 surrogate halves (\uD800–\uDFFF). Page DOM text,
+// OCR output, and other CDP-sourced strings can contain lone surrogates;
+// JSON consumers downstream (Anthropic API in particular) reject them with
+// "no low surrogate in string". Valid surrogate pairs (e.g. emoji) survive
+// unchanged. Lone halves become U+FFFD (�).
+//
+// INVARIANT: every server egress path that ships page-content strings MUST
+// route through this sanitizer. handleCommandInternal wraps the final
+// cr.result string (text/plain bodies carry lone surrogates verbatim;
+// JSON.stringify already escapes them). The two SSE producers below
+// stringify with `sanitizeReplacer` so payload string fields get cleaned
+// BEFORE escaping. Plain post-stringify regex is a no-op there because
+// JSON.stringify converts \uD800 → "\\ud800" — the regex can't see the
+// surrogate after that point.
+function sanitizeLoneSurrogates(str: string): string {
+  return str.replace(/[\uD800-\uDFFF]/g, (match, offset) => {
+    const code = match.charCodeAt(0);
+    if (code >= 0xD800 && code <= 0xDBFF) {
+      const next = str.charCodeAt(offset + 1);
+      if (next >= 0xDC00 && next <= 0xDFFF) return match;
+    }
+    if (code >= 0xDC00 && code <= 0xDFFF) {
+      const prev = str.charCodeAt(offset - 1);
+      if (prev >= 0xD800 && prev <= 0xDBFF) return match;
+    }
+    return '�';
+  });
+}
+
+// JSON.stringify replacer that sanitizes string values before they get
+// escape-encoded. Pair with stringify when the consumer will JSON.parse the
+// payload back into JS strings (SSE clients do this).
+function sanitizeReplacer(_key: string, value: unknown): unknown {
+  return typeof value === 'string' ? sanitizeLoneSurrogates(value) : value;
+}
+
 // ─── Config ─────────────────────────────────────────────────────
 const config = resolveConfig();
 ensureStateDir(config);
@@ -683,7 +720,7 @@ interface CommandResult {
  *   skipActivity: true when called from chain (chain emits 1 event for all subcommands)
  *   chainDepth: recursion guard — reject nested chains (depth > 0 means inside a chain)
  */
-async function handleCommandInternal(
+async function handleCommandInternalImpl(
   body: { command: string; args?: string[]; tabId?: number },
   tokenInfo?: TokenInfo | null,
   opts?: { skipRateCheck?: boolean; skipActivity?: boolean; chainDepth?: number },
@@ -1025,6 +1062,21 @@ async function handleCommandInternal(
     if (hint) errorMsg += '\n' + hint;
     return { status: 500, result: JSON.stringify({ error: errorMsg }), json: true };
   }
+}
+
+/**
+ * Sanitizing wrapper around handleCommandInternalImpl. ALL callers (single-command
+ * HTTP, batch loop, scoped-token dispatch) go through this so the lone-surrogate
+ * sanitization happens once at the architectural choke point, not per-leaf.
+ * Do not bypass this by calling handleCommandInternalImpl directly.
+ */
+async function handleCommandInternal(
+  body: { command: string; args?: string[]; tabId?: number },
+  tokenInfo?: TokenInfo | null,
+  opts?: { skipRateCheck?: boolean; skipActivity?: boolean; chainDepth?: number },
+): Promise<CommandResult> {
+  const cr = await handleCommandInternalImpl(body, tokenInfo, opts);
+  return { ...cr, result: sanitizeLoneSurrogates(cr.result) };
 }
 
 /** HTTP wrapper — converts CommandResult to Response */
@@ -1827,19 +1879,24 @@ export async function start() {
 
         const stream = new ReadableStream({
           start(controller) {
+            // SSE egress invariant: every JSON.stringify here ships page-content-derived
+            // fields (URLs, command args, errors) to the sidebar. Lone surrogates must
+            // be sanitized DURING stringify (via sanitizeReplacer) so they're cleaned
+            // before escape-encoding — post-stringify regex is ineffective because
+            // JSON.stringify has already converted \uD800 → "\\ud800".
             // 1. Gap detection + replay
             const { entries, gap, gapFrom, availableFrom } = getActivityAfter(afterId);
             if (gap) {
-              controller.enqueue(encoder.encode(`event: gap\ndata: ${JSON.stringify({ gapFrom, availableFrom })}\n\n`));
+              controller.enqueue(encoder.encode(`event: gap\ndata: ${JSON.stringify({ gapFrom, availableFrom }, sanitizeReplacer)}\n\n`));
             }
             for (const entry of entries) {
-              controller.enqueue(encoder.encode(`event: activity\ndata: ${JSON.stringify(entry)}\n\n`));
+              controller.enqueue(encoder.encode(`event: activity\ndata: ${JSON.stringify(entry, sanitizeReplacer)}\n\n`));
             }
 
             // 2. Subscribe for live events
             const unsubscribe = subscribe((entry) => {
               try {
-                controller.enqueue(encoder.encode(`event: activity\ndata: ${JSON.stringify(entry)}\n\n`));
+                controller.enqueue(encoder.encode(`event: activity\ndata: ${JSON.stringify(entry, sanitizeReplacer)}\n\n`));
               } catch (err: any) {
                 console.debug('[browse] Activity SSE stream error, unsubscribing:', err.message);
                 unsubscribe();
@@ -2188,10 +2245,15 @@ export async function start() {
         const encoder = new TextEncoder();
         const stream = new ReadableStream({
           start(controller) {
+            // SSE egress invariant: inspectorData and CDP event payloads carry
+            // page-DOM strings (selectors, attribute values, console messages).
+            // sanitizeReplacer cleans lone surrogates DURING JSON.stringify so
+            // they're neutralized before escape-encoding (post-stringify regex
+            // is a no-op once \uD800 has become "\\ud800").
             // Send current state immediately
             if (inspectorData) {
               controller.enqueue(encoder.encode(
-                `event: state\ndata: ${JSON.stringify({ data: inspectorData, timestamp: inspectorTimestamp })}\n\n`
+                `event: state\ndata: ${JSON.stringify({ data: inspectorData, timestamp: inspectorTimestamp }, sanitizeReplacer)}\n\n`
               ));
             }
 
@@ -2199,7 +2261,7 @@ export async function start() {
             const notify: InspectorSubscriber = (event) => {
               try {
                 controller.enqueue(encoder.encode(
-                  `event: inspector\ndata: ${JSON.stringify(event)}\n\n`
+                  `event: inspector\ndata: ${JSON.stringify(event, sanitizeReplacer)}\n\n`
                 ));
               } catch (err: any) {
                 console.debug('[browse] Inspector SSE stream error:', err.message);

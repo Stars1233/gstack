@@ -459,6 +459,8 @@ Data is stored in [Supabase](https://supabase.com) (open source Firebase alterna
 
 **Windows users:** gstack works on Windows 11 via Git Bash or WSL. Node.js is required in addition to Bun — Bun has a known bug with Playwright's pipe transport on Windows ([bun#4253](https://github.com/oven-sh/bun/issues/4253)). The browse server automatically falls back to Node.js. Make sure both `bun` and `node` are on your PATH.
 
+On Windows without Developer Mode (MSYS2 / Git Bash), `setup` falls back to file copies instead of symlinks because `ln -snf` produces frozen copies that don't refresh on `git pull`. **Re-run `cd ~/.claude/skills/gstack && ./setup` after every `git pull`** so your skill files match the repo. `setup` prints a one-line note reminding you. Unix and WSL keep symlinks and don't need the re-run.
+
 **Claude says it can't see the skills?** Make sure your project's `CLAUDE.md` has a gstack section. Add this:
 
 ```
